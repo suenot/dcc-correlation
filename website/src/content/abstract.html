@@ -1,0 +1,48 @@
+<p>Sample correlation is an average over a window during which the true
+dependence structure was moving. We ask, under known ground truth, how
+much a dynamic model recovers that a static or rolling estimate throws
+away. We build seeded synthetic data-generating processes in which the
+conditional correlation follows a prescribed calm/crisis/recovery path
+(equicorrelation <span class="math inline">0.3</span> in calm, ramping
+to <span class="math inline">0.9</span> in the crisis, partially
+recovering to <span class="math inline">0.5</span>) on top of GARCH<span
+class="math inline">(1,1)</span> volatilities, implement the two-step
+Dynamic Conditional Correlation (DCC) estimator of Engle from scratch on
+top of the univariate <code>arch</code> library, and measure recovery
+directly. First, DCC tracks the correlation path with a crisis-window
+mean absolute error of <span class="math inline">0.028</span> on a
+two-asset process, against <span class="math inline">0.208</span> for
+the static full-sample correlation — a factor of roughly <span
+class="math inline">7</span> — while beating every fixed rolling window
+on crisis-window error and on overall root-mean-square error; no single
+rolling window is simultaneously best overall and in the crisis, and DCC
+is. On a stationary DCC simulation the estimator recovers the true
+parameters <span class="math inline">(a,b)=(0.05,0.90)</span> as <span
+class="math inline">(0.049,0.914)</span>. Second, a one-step <span
+class="math inline">95\%</span> Value-at-Risk backtest on an
+equal-weight portfolio shows the cost of ignoring correlation dynamics:
+static covariance breaches at <span class="math inline">0.111</span>
+inside the crisis — <span class="math inline">2.2</span> times the
+nominal <span class="math inline">0.05</span> — while its full-sample
+breach rate of <span class="math inline">0.049</span> looks perfectly
+calibrated, hiding the failure exactly when it matters; DCC holds the
+crisis breach rate at <span class="math inline">0.063</span>, close to
+the <span class="math inline">0.060</span> delivered by the true
+covariance. Third, a DCC dynamic hedge ratio cuts hedged-spread variance
+by a fraction <span class="math inline">0.208</span> inside the crisis
+relative to a static ordinary-least-squares hedge, and tracks the true
+time-varying beta with a crisis error of <span
+class="math inline">0.035</span> against <span
+class="math inline">0.248</span>. Finally, a parameter-count comparison
+shows why DCC scales where full multivariate GARCH cannot (<span
+class="math inline">8</span> versus <span class="math inline">11</span>
+versus <span class="math inline">21</span> free parameters at <span
+class="math inline">d=2</span>; <span class="math inline">152</span>
+versus <span class="math inline">6275</span> versus <span
+class="math inline">3.25\times 10^{6}</span> at <span
+class="math inline">d=50</span> for DCC, BEKK, and VECH), and the
+estimated <span class="math inline">(a,b)</span> stay stable as the
+cross-section grows to <span class="math inline">d=10</span>. The
+deliverable is the calibrated method and the quantified cost of static
+correlation, not a market claim: the processes are synthetic by
+design.</p>

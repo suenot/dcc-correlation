@@ -1,0 +1,782 @@
+<h1 id="sec:intro">Introduction</h1>
+<p>Ask for the correlation between two assets and you typically get a
+single number computed over some window nobody remembers choosing. That
+number averages over a period in which the true dependence structure was
+moving constantly. In calm markets assets drift apart; in a stress event
+they lock together, and the diversification a portfolio was built on
+evaporates at the moment it is most needed. Correlation is not a
+constant that occasionally gets estimated badly — it is a time series
+with its own clustering and regimes, and treating it as a scalar is the
+multivariate cousin of assuming constant volatility.</p>
+<p>The econometrics literature offers a ladder of answers. Modeling the
+full conditional covariance matrix directly — VECH <span
+class="citation" data-cites="bollerslev1988vech">[3]</span> or BEKK
+<span class="citation" data-cites="englekroner1995bekk">[7]</span> — is
+general but its parameter count grows quadratically or quartically in
+the number of assets <span class="math inline">d</span>, confining it to
+a handful of series in practice. The Constant Conditional Correlation
+model of <span class="citation"
+data-cites="bollerslev1990ccc">[2]</span> factors the covariance into
+univariate volatilities and a correlation matrix, buying tractability at
+the price of freezing the correlation. Engle’s Dynamic Conditional
+Correlation (DCC) model <span class="citation"
+data-cites="engle2002dcc">[5]</span> keeps that factorization but lets
+the correlation matrix evolve through a two-parameter recursion,
+estimated in two steps <span class="citation"
+data-cites="englesheppard2001dcc">[8]</span>; <span class="citation"
+data-cites="cappiello2006asymmetric">[4]</span> add downside asymmetry.
+DCC is attractive precisely because it scales: the volatility side is
+<span class="math inline">d</span> independent univariate fits and the
+correlation side has only two free parameters, whatever <span
+class="math inline">d</span> is.</p>
+<p>What is easy to assert but harder to demonstrate is that this
+machinery actually recovers a moving correlation better than the naive
+alternatives, and that the difference matters for a downstream decision.
+Demonstrating it requires knowing the truth. That is the gap this paper
+fills. We do not claim a new estimator and we make no claim about real
+markets; the contribution is calibration evidence under controlled
+ground truth — synthetic, seeded data-generating processes whose
+conditional correlation path we prescribe by construction — together
+with a self-contained DCC implementation built on the univariate
+<code>arch</code> library <span class="citation"
+data-cites="sheppard_arch">[9]</span>, which fits univariate GARCH <span
+class="citation" data-cites="engle1982arch bollerslev1986garch">[1,
+6]</span> but has no multivariate layer. Implementing the DCC layer is
+part of the contribution.</p>
+<p>Concretely, we run four experiments (Section <a href="#sec:design"
+data-reference-type="ref" data-reference="sec:design">4</a>) against the
+estimator of Section <a href="#sec:method" data-reference-type="ref"
+data-reference="sec:method">3</a>:</p>
+<ol>
+<li><p><strong>Correlation tracking.</strong> On two- and three-asset
+processes with a known calm/crisis/recovery correlation path, DCC tracks
+the path with lower crisis-window error than any fixed rolling window
+and far lower than static correlation, and on a stationary DCC
+simulation it recovers the true parameters <span
+class="math inline">(a,b)</span>.</p></li>
+<li><p><strong>Static-risk misstatement.</strong> A one-step portfolio
+Value-at-Risk backtest shows that static and rolling covariance
+under-state risk precisely during the correlation spike, breaching far
+above the nominal rate inside the crisis, while DCC stays close to
+nominal.</p></li>
+<li><p><strong>Dynamic hedge ratio.</strong> A DCC time-varying hedge
+ratio reduces hedged-spread variance relative to a static hedge and
+tracks the true time-varying beta, most visibly inside the
+crisis.</p></li>
+<li><p><strong>Dimensionality.</strong> A parameter-count comparison
+quantifies DCC’s linear scaling against BEKK’s quadratic and VECH’s
+quartic growth, and an empirical note confirms <span
+class="math inline">(a,b)</span> estimation stays stable as <span
+class="math inline">d</span> grows.</p></li>
+</ol>
+<p>This study accompanies a <a
+href="https://marketmaker.cc">marketmaker.cc</a> blog post. All numbers
+derive from one seeded run of a public harness; a companion script
+verifies every numeric claim in this manuscript against the run’s JSON
+output.</p>
+<h1 id="sec:dgp">The data-generating processes and ground truth</h1>
+<p>Every experiment draws from a synthetic process with a KNOWN
+conditional covariance path, so that estimation error can be measured
+rather than argued about. Let <span
+class="math inline">r_{t}\in\mathbb{R}^{d}</span> be the return vector
+at time <span class="math inline">t</span>. We generate <span
+class="math display">\begin{equation}
+\label{eq:dgp}
+r_{t} = D_{t}\,L_{t}\,e_{t}, \qquad e_{t}\sim\mathcal{N}(0,I_{d}),
+\qquad L_{t}L_{t}&#39; = R_{t},
+\end{equation}</span> where <span
+class="math inline">D_{t}=\mathrm{diag}(\sigma_{1,t},\dots,\sigma_{d,t})</span>
+collects per-asset conditional volatilities and <span
+class="math inline">L_{t}</span> is the Cholesky factor of the true
+conditional correlation matrix <span class="math inline">R_{t}</span>.
+The true conditional covariance is therefore <span
+class="math inline">H_{t}= D_{t}\,R_{t}\,D_{t}</span>, known exactly at
+every step.</p>
+<h4 id="correlation-path.">Correlation path.</h4>
+<p><span class="math inline">R_{t}</span> is an equicorrelation matrix
+with a single time-varying off-diagonal <span
+class="math inline">\rho_{t}</span> following a piecewise path over
+<span class="math inline">T = 2000</span> observations: a calm regime at
+<span class="math inline">\rho = 0.3</span>, a linear ramp up to a
+crisis level of <span class="math inline">\rho = 0.9</span>, a crisis
+plateau, a recovery ramp down, and a final calm regime at a partially
+recovered <span class="math inline">\rho = 0.5</span>. The crisis window
+— the stress episode of elevated correlation — spans observations <span
+class="math inline">600</span> to <span class="math inline">1300</span>.
+This is the ground-truth path every estimator in Section <a
+href="#sec:res-track" data-reference-type="ref"
+data-reference="sec:res-track">5.1</a> is scored against.</p>
+<h4 id="volatility-path.">Volatility path.</h4>
+<p>Each <span class="math inline">\sigma_{i,t}^{2}</span> follows a
+GARCH<span class="math inline">(1,1)</span> recursion <span
+class="math inline">\sigma_{i,t}^{2} = \omega_{t} +
+\alpha\,\epsilon_{i,t-1}^{2} +
+\beta\,\sigma_{i,t-1}^{2}</span> with <span class="math inline">\alpha =
+0.10</span> and <span class="math inline">\beta = 0.85</span>, sharing a
+variance intercept <span class="math inline">\omega_{t}</span> that
+rises from a calm <span class="math inline">0.05</span> to a crisis
+<span class="math inline">0.20</span> over the same schedule as the
+correlation. Volatility and correlation therefore spike together, as
+they do in real drawdowns: the crisis is a high-volatility,
+high-correlation regime, and the resulting elevation of true portfolio
+variance is what the risk experiment probes.</p>
+<h4 id="stationary-dcc-process.">Stationary DCC process.</h4>
+<p>To test parameter recovery we also generate standardized residuals
+directly from the DCC recursion itself (Section <a href="#sec:method"
+data-reference-type="ref" data-reference="sec:method">3</a>) with fixed,
+known parameters <span class="math inline">(a,b)</span> and a fixed
+target correlation, over <span class="math inline">T = 4000</span>
+observations. Here the ground truth is the pair <span
+class="math inline">(a,b)</span>, and the question is whether the
+estimator recovers it.</p>
+<p>All random streams use <code>numpy</code>’s seeded generator, so
+every number is bit-reproducible by one command.</p>
+<h1 id="sec:method">The DCC-GARCH estimator</h1>
+<h2 id="factorization">Factorization</h2>
+<p>Following <span class="citation"
+data-cites="engle2002dcc">[5]</span>, the conditional covariance is
+factored as <span class="math display">\begin{equation}
+\label{eq:factor}
+H_{t}= D_{t}\,R_{t}\,D_{t},
+\end{equation}</span> with <span class="math inline">D_{t}</span> the
+diagonal matrix of conditional standard deviations from <span
+class="math inline">d</span> univariate GARCH models and <span
+class="math inline">R_{t}</span> the conditional correlation matrix.
+Elementwise, <span class="math inline">h_{ij,t} =
+\rho_{ij,t}\,\sigma_{i,t}\,\sigma_{j,t}</span>: the conditional
+covariance of two assets is their dynamic correlation times each of
+their dynamic volatilities. <span class="citation"
+data-cites="bollerslev1990ccc">[2]</span> froze <span
+class="math inline">R_{t}</span> to a constant; DCC lets it move.</p>
+<h2 id="step-1-univariate-volatilities">Step 1: univariate
+volatilities</h2>
+<p>For each asset <span class="math inline">i</span> we fit a univariate
+GARCH<span class="math inline">(1,1)</span> with the <code>arch</code>
+library <span class="citation" data-cites="sheppard_arch">[9]</span>,
+obtaining the conditional volatility <span
+class="math inline">\sigma_{i,t}</span> and the standardized residual
+<span class="math display">\begin{equation}
+\label{eq:zstd}
+z_{i,t} = \frac{\epsilon_{i,t}}{\sigma_{i,t}}.
+\end{equation}</span> Each <span class="math inline">z_{i,t}</span> has
+approximately unit conditional variance; whatever co-movement remains in
+the vector <span
+class="math inline">z_{t}=(z_{1,t},\dots,z_{d,t})&#39;</span> is
+dependence, not a volatility artifact.</p>
+<h2 id="step-2-the-correlation-recursion">Step 2: the correlation
+recursion</h2>
+<p>We model an auxiliary process <span class="math inline">Q_{t}</span>,
+a symmetric positive-definite matrix, with a scalar GARCH-like recursion
+driven by the outer products of the standardized residuals: <span
+class="math display">\begin{equation}
+\label{eq:qrec}
+Q_{t} = (1-a-b)\,\bar{Q} + a\,z_{t-1}z_{t-1}&#39; + b\,Q_{t-1},
+\end{equation}</span> where <span class="math inline">\bar{Q}</span> is
+the unconditional correlation matrix of the standardized residuals —
+plugged in as a sample estimate rather than optimized, the
+<em>correlation-targeting</em> device that confines the dimensionality
+to <span class="math inline">\bar{Q}</span> and leaves only <span
+class="math inline">a</span> and <span class="math inline">b</span> to
+estimate. The constraints <span class="math inline">a,b&gt;0</span> and
+<span class="math inline">a+b&lt;1</span> keep <span
+class="math inline">Q_{t}</span> positive definite and mean-reverting,
+exactly analogous to a univariate GARCH<span
+class="math inline">(1,1)</span>. Because <span
+class="math inline">Q_{t}</span> has a diagonal that is not exactly one,
+we normalize it to a proper correlation matrix, <span
+class="math display">\begin{equation}
+\label{eq:qnorm}
+R_{t}= \mathrm{diag}(Q_{t})^{-1/2}\,Q_{t}\,\mathrm{diag}(Q_{t})^{-1/2},
+\qquad
+\rho_{ij,t} = \frac{q_{ij,t}}{\sqrt{q_{ii,t}\,q_{jj,t}}},
+\end{equation}</span> which is symmetric positive definite with unit
+diagonal at every step by construction. The whole correlation layer has
+only two parameters, regardless of whether <span
+class="math inline">d=2</span> or <span
+class="math inline">d=50</span>.</p>
+<h2 id="the-quasi-log-likelihood">The quasi-log-likelihood</h2>
+<p>Under <span
+class="math inline">\epsilon_{t}\mid\mathcal{F}_{t-1}\sim\mathcal{N}(0,H_{t})</span>
+the Gaussian log-likelihood separates into a volatility part depending
+only on <span class="math inline">D_{t}</span> and a correlation part
+depending on <span class="math inline">R_{t}</span> <span
+class="citation" data-cites="engle2002dcc">[5]</span>. Maximizing the
+volatility part is exactly the <span class="math inline">d</span>
+univariate fits of Step 1; the correlation part, given the standardized
+residuals, is the two-parameter objective <span
+class="math display">\begin{equation}
+\label{eq:dccll}
+\mathcal{L}^{C}(a,b) = -\frac{1}{2}\sum_{t=1}^{T}
+\Big(\log|R_{t}| + z_{t}&#39;\,R_{t}^{-1}\,z_{t}\Big),
+\end{equation}</span> which we maximize over <span
+class="math inline">(a,b)</span> with a derivative-free multi-start
+search. It is a <em>quasi</em>-likelihood: the two-step estimator is
+consistent but not fully efficient, and correct standard errors need the
+<span class="citation" data-cites="englesheppard2001dcc">[8]</span>
+correction; for recovering the correlation path the point estimates are
+what matter. Timing is strictly causal: in the recursion <span
+class="math inline">R_{t}</span> is scored against <span
+class="math inline">z_{t}</span> and only then is <span
+class="math inline">Q</span> advanced with <span
+class="math inline">z_{t}z_{t}&#39;</span> for step <span
+class="math inline">t+1</span>, so <span
+class="math inline">R_{t}</span> uses information through <span
+class="math inline">t-1</span> only — the off-by-one that silently
+inflates in-sample fit is avoided by construction.</p>
+<h2 id="baselines">Baselines</h2>
+<p>Against DCC we run the estimators a practitioner reaches for first.
+The <em>static</em> baseline is the full-sample Pearson correlation (or
+covariance), a single matrix held fixed for all <span
+class="math inline">t</span>. The <em>rolling</em> baselines recompute
+the Pearson correlation (or covariance) over a trailing window of the
+last <span class="math inline">w</span> observations, causal by
+construction, for <span
+class="math inline">w\in\{30,60,120,250\}</span>. These are exactly the
+estimators DCC must beat to justify its extra machinery.</p>
+<h1 id="sec:design">Experimental design</h1>
+<p>All experiments are generated and analyzed by one seeded Python
+harness (<code>scripts/run_all.py</code>, estimator in
+<code>scripts/dcc.py</code>) under Python <span
+class="math inline">3.14.6</span> with NumPy <span
+class="math inline">2.5.1</span>. A verification script
+(<code>scripts/check_paper_numbers.py</code>) checks every numeric claim
+below against <code>results/results.json</code> and fails on any
+mismatch; quantities are rounded from that file.</p>
+<h4 id="experiment-1-correlation-tracking.">Experiment 1: correlation
+tracking.</h4>
+<p>On the two- and three-asset regime processes we compare the average
+pairwise correlation implied by DCC, by each rolling window, and by the
+static estimate against the true path <span
+class="math inline">\rho_{t}</span>, reporting mean absolute error (MAE)
+and root-mean-square error (RMSE) both overall and restricted to the
+crisis window. Separately, on the stationary DCC process we fit <span
+class="math inline">(a,b)</span> and compare to the known truth.</p>
+<h4 id="experiment-2-static-risk-misstatement.">Experiment 2:
+static-risk misstatement.</h4>
+<p>For an equal-weight portfolio we compute one-step <span
+class="math inline">95\%</span> Gaussian Value-at-Risk, <span
+class="math inline">\mathrm{VaR}_{t} =
+z_{0.95}\sqrt{w&#39;\Sigma_{t}w}</span> with <span
+class="math inline">z_{0.95}\approx 1.645</span>, using in turn the
+static, rolling, DCC, and true covariance for <span
+class="math inline">\Sigma_{t}</span>, each built from information
+through <span class="math inline">t-1</span>. A breach is a realized
+portfolio loss exceeding <span
+class="math inline">\mathrm{VaR}_{t}</span>. We report the breach rate
+overall, in the crisis window, and in the calm periods; the nominal rate
+is <span class="math inline">0.05</span>.</p>
+<h4 id="experiment-3-dynamic-hedge-ratio.">Experiment 3: dynamic hedge
+ratio.</h4>
+<p>On the two-asset process we form the minimum-variance hedge ratio of
+asset one against asset two, <span class="math inline">\beta_{t} =
+\rho_{t}\,\sigma_{1,t}/\sigma_{2,t}</span>, from DCC outputs, and
+compare it to a static ordinary-least-squares hedge ratio (the
+full-sample covariance ratio). Hedging with the lagged <span
+class="math inline">\beta_{t-1}</span> we measure the variance of the
+hedged spread and its reduction relative to the static hedge, plus the
+tracking error of the estimated <span
+class="math inline">\beta_{t}</span> against the true <span
+class="math inline">\beta_{t}</span>.</p>
+<h4 id="experiment-4-dimensionality.">Experiment 4: dimensionality.</h4>
+<p>We tabulate the free-parameter count of full VECH, full BEKK, and DCC
+as <span class="math inline">d</span> grows, and re-run the
+parameter-recovery experiment at <span
+class="math inline">d\in\{2,3,5,10\}</span> to check that the estimated
+<span class="math inline">(a,b)</span> stay stable as the cross-section
+widens.</p>
+<h1 id="sec:results">Results</h1>
+<h2 id="sec:res-track">Correlation tracking and parameter recovery</h2>
+<p>Table <a href="#tab:track" data-reference-type="ref"
+data-reference="tab:track">1</a> reports the tracking errors on the
+two-asset process. The static full-sample correlation is a flat line at
+<span class="math inline">0.673</span>, and it is hopeless against a
+path that moves between <span class="math inline">0.3</span> and <span
+class="math inline">0.9</span>: its crisis-window MAE is <span
+class="math inline">0.208</span>. DCC drives that down to <span
+class="math inline">0.028</span>, a factor of roughly <span
+class="math inline">7</span>. The comparison against rolling windows is
+where the honest structure of the result lives. No single fixed window
+is best everywhere: the window that tracks best overall (<span
+class="math inline">w=120</span>, overall MAE <span
+class="math inline">0.060</span>) lags badly through the crisis (crisis
+MAE <span class="math inline">0.037</span>), while the window that
+tracks the crisis best (<span class="math inline">w=60</span>, crisis
+MAE <span class="math inline">0.031</span>) is noisier overall. DCC is
+at or below the best window on every slice at once — crisis MAE <span
+class="math inline">0.028</span> (below the best window’s <span
+class="math inline">0.031</span>), overall RMSE <span
+class="math inline">0.083</span> (below every window’s), and overall MAE
+<span class="math inline">0.061</span> (indistinguishable from the best
+window’s <span class="math inline">0.060</span>). A short window is
+responsive but noisy; a long window is smooth but stale; DCC’s
+exponential, adaptively weighted memory is both, which is exactly the
+tradeoff the two parameters <span class="math inline">(a,b)</span> are
+there to resolve.</p>
+<div id="tab:track">
+<table>
+<caption>Experiment 1, two-asset process (<span class="math inline">T =
+2000</span>): tracking error of each estimator against the true
+correlation path, overall and inside the crisis window (observations
+<span class="math inline">600</span> to <span
+class="math inline">1300</span>). DCC has the lowest crisis-window error
+of all and the lowest overall RMSE; no single rolling window is best
+both overall and in the crisis. The static estimate is the full-sample
+correlation <span class="math inline">0.673</span>.</caption>
+<thead>
+<tr>
+<th style="text-align: left;">Estimator</th>
+<th style="text-align: right;">MAE overall</th>
+<th style="text-align: right;">RMSE overall</th>
+<th style="text-align: right;">MAE crisis</th>
+<th style="text-align: right;">RMSE crisis</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">Static (full sample)</td>
+<td style="text-align: right;">0.238</td>
+<td style="text-align: right;">0.259</td>
+<td style="text-align: right;">0.208</td>
+<td style="text-align: right;">0.217</td>
+</tr>
+<tr>
+<td style="text-align: left;">Rolling <span
+class="math inline">w=30</span></td>
+<td style="text-align: right;">0.092</td>
+<td style="text-align: right;">0.129</td>
+<td style="text-align: right;">0.037</td>
+<td style="text-align: right;">0.048</td>
+</tr>
+<tr>
+<td style="text-align: left;">Rolling <span
+class="math inline">w=60</span></td>
+<td style="text-align: right;">0.069</td>
+<td style="text-align: right;">0.100</td>
+<td style="text-align: right;">0.031</td>
+<td style="text-align: right;">0.040</td>
+</tr>
+<tr>
+<td style="text-align: left;">Rolling <span
+class="math inline">w=120</span></td>
+<td style="text-align: right;">0.060</td>
+<td style="text-align: right;">0.087</td>
+<td style="text-align: right;">0.037</td>
+<td style="text-align: right;">0.054</td>
+</tr>
+<tr>
+<td style="text-align: left;">Rolling <span
+class="math inline">w=250</span></td>
+<td style="text-align: right;">0.071</td>
+<td style="text-align: right;">0.102</td>
+<td style="text-align: right;">0.074</td>
+<td style="text-align: right;">0.101</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>DCC-GARCH</strong></td>
+<td style="text-align: right;">0.061</td>
+<td style="text-align: right;">0.083</td>
+<td style="text-align: right;"><strong>0.028</strong></td>
+<td style="text-align: right;"><strong>0.039</strong></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The three-asset process tells the same story: DCC’s crisis-window MAE
+is <span class="math inline">0.066</span>, below every rolling window
+(best <span class="math inline">0.070</span> at <span
+class="math inline">w=60</span>) and far below the static <span
+class="math inline">0.202</span>, and it fits <span
+class="math inline">(a,b)=(0.031,0.966)</span> — the near-unit
+persistence and small shock loading that is the canonical DCC
+fingerprint.</p>
+<p>Parameter recovery is exact to within sampling noise. On the
+stationary two-asset DCC process with true <span
+class="math inline">(a,b) = (0.05,0.90)</span>, the estimator returns
+<span class="math inline">(0.049,0.914)</span>: an absolute error of
+<span class="math inline">0.0015</span> in <span
+class="math inline">a</span> and <span class="math inline">0.014</span>
+in <span class="math inline">b</span>. On a three-asset process with
+true <span class="math inline">(0.04,0.92)</span> it returns <span
+class="math inline">(0.040,0.914)</span>. The self-contained two-step
+estimator recovers the data-generating parameters, so the tracking
+performance above is not an artifact of a mis-specified fit.</p>
+<h2 id="sec:res-risk">Static covariance under-states portfolio risk in
+the spike</h2>
+<p>Table <a href="#tab:risk" data-reference-type="ref"
+data-reference="tab:risk">2</a> is the practical payoff. For the
+equal-weight two-asset portfolio, the static full-sample covariance
+produces a <span class="math inline">95\%</span> VaR whose overall
+breach rate is <span class="math inline">0.049</span> — essentially
+perfect calibration, and exactly the false comfort that makes static
+covariance dangerous. That average hides a violent split: inside the
+crisis the static VaR is breached at <span
+class="math inline">0.111</span>, <span class="math inline">2.2</span>
+times the nominal <span class="math inline">0.05</span>, while in the
+calm periods it breaches at only <span class="math inline">0.015</span>.
+A risk manager watching the full-sample number would see a
+well-calibrated model while carrying more than double the intended tail
+risk through every stress episode. The rolling covariance (<span
+class="math inline">w=60</span>) improves the crisis breach rate to
+<span class="math inline">0.069</span> but still runs hot, because a
+trailing window that straddles the regime boundary is a blend of calm
+and crisis. DCC holds the crisis breach rate to <span
+class="math inline">0.063</span>, within touching distance of the <span
+class="math inline">0.060</span> that the <em>true</em> covariance
+itself delivers in finite sample — the irreducible floor. The
+three-asset portfolio repeats the pattern: static breaches at <span
+class="math inline">0.103</span> in the crisis versus DCC’s <span
+class="math inline">0.070</span> and the truth’s <span
+class="math inline">0.060</span>.</p>
+<div id="tab:risk">
+<table>
+<caption>Experiment 2: one-step <span class="math inline">95\%</span>
+VaR breach rates for an equal-weight portfolio (nominal <span
+class="math inline">0.05</span>), by covariance estimator, overall and
+split into crisis and calm periods. Static covariance looks calibrated
+overall (<span class="math inline">0.049</span>) but breaches at <span
+class="math inline">0.111</span> — <span
+class="math inline">2.2\times</span> nominal — inside the crisis; DCC
+stays close to the true-covariance floor.</caption>
+<thead>
+<tr>
+<th style="text-align: left;">Covariance estimator</th>
+<th style="text-align: right;">Breach overall</th>
+<th style="text-align: right;">Breach crisis</th>
+<th style="text-align: right;">Breach calm</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">Static (full sample)</td>
+<td style="text-align: right;">0.049</td>
+<td style="text-align: right;">0.111</td>
+<td style="text-align: right;">0.015</td>
+</tr>
+<tr>
+<td style="text-align: left;">Rolling (<span
+class="math inline">w=60</span>)</td>
+<td style="text-align: right;">0.062</td>
+<td style="text-align: right;">0.069</td>
+<td style="text-align: right;">0.058</td>
+</tr>
+<tr>
+<td style="text-align: left;">DCC-GARCH</td>
+<td style="text-align: right;">0.056</td>
+<td style="text-align: right;">0.063</td>
+<td style="text-align: right;">0.052</td>
+</tr>
+<tr>
+<td style="text-align: left;">True covariance</td>
+<td style="text-align: right;">0.060</td>
+<td style="text-align: right;">0.060</td>
+<td style="text-align: right;">0.060</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="sec:res-hedge">A dynamic hedge ratio</h2>
+<p>On the two-asset process the static OLS hedge ratio is a constant
+<span class="math inline">0.650</span>, while the true minimum-variance
+hedge ratio averages <span class="math inline">0.576</span> and moves
+with the regime. The DCC hedge ratio averages <span
+class="math inline">0.575</span> and tracks the true path with a mean
+absolute error of <span class="math inline">0.067</span> overall and
+<span class="math inline">0.035</span> inside the crisis, against the
+static hedge’s <span class="math inline">0.236</span> and <span
+class="math inline">0.248</span>. Trading the lagged hedge, the
+DCC-hedged spread has a fractional variance reduction of <span
+class="math inline">0.120</span> relative to the static-hedged spread
+overall, rising to <span class="math inline">0.208</span> inside the
+crisis — precisely where the static hedge, calibrated to the full-sample
+average, is most wrong. The dynamic hedge does not create an edge; it
+keeps the traded spread market-neutral through the regime shift instead
+of drifting into directional exposure exactly when correlation
+moves.</p>
+<h2 id="sec:res-dim">Dimensionality</h2>
+<p>Table <a href="#tab:dim" data-reference-type="ref"
+data-reference="tab:dim">3</a> is the structural reason DCC is used at
+all. Counting free parameters, full VECH carries an intercept plus two
+coefficient matrices on the half-vectorization of the covariance,
+growing as <span class="math inline">O(d^{4})</span>; full BEKK carries
+a triangular intercept plus two <span class="math inline">d\times
+d</span> coefficient matrices, <span
+class="math inline">O(d^{2})</span>; DCC carries three parameters per
+univariate GARCH plus the two correlation scalars, <span
+class="math inline">O(d)</span>. The gap is not asymptotic hand-waving:
+at <span class="math inline">d=5</span> it is <span
+class="math inline">17</span> parameters for DCC versus <span
+class="math inline">65</span> for BEKK and <span
+class="math inline">465</span> for VECH, and at <span
+class="math inline">d=50</span> it is <span
+class="math inline">152</span> versus <span
+class="math inline">6275</span> versus <span
+class="math inline">3.25\times 10^{6}</span>. VECH and BEKK are simply
+not estimable on the cross-sections DCC handles routinely. The
+correlation layer itself never grows past two parameters. Estimation
+stays well-behaved as the cross-section widens: re-running the recovery
+of true <span class="math inline">(a,b)=(0.05,0.90)</span> at <span
+class="math inline">d=2,3,5,10</span> returns <span
+class="math inline">a</span> within <span
+class="math inline">0.006</span> and <span class="math inline">b</span>
+within <span class="math inline">0.015</span> of the truth at every
+width, with no drift as <span class="math inline">d</span> grows.</p>
+<div id="tab:dim">
+<table>
+<caption>Experiment 4: free-parameter counts of full VECH, full BEKK,
+and DCC (three per univariate GARCH<span
+class="math inline">(1,1)</span> plus the two correlation scalars) as
+the number of assets <span class="math inline">d</span> grows. VECH is
+<span class="math inline">O(d^{4})</span>, BEKK is <span
+class="math inline">O(d^{2})</span>, DCC is <span
+class="math inline">O(d)</span> with a correlation layer fixed at two
+parameters.</caption>
+<thead>
+<tr>
+<th style="text-align: right;"><span class="math inline">d</span></th>
+<th style="text-align: right;">VECH</th>
+<th style="text-align: right;">BEKK</th>
+<th style="text-align: right;">DCC</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">21</td>
+<td style="text-align: right;">11</td>
+<td style="text-align: right;">8</td>
+</tr>
+<tr>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">78</td>
+<td style="text-align: right;">24</td>
+<td style="text-align: right;">11</td>
+</tr>
+<tr>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">465</td>
+<td style="text-align: right;">65</td>
+<td style="text-align: right;">17</td>
+</tr>
+<tr>
+<td style="text-align: right;">10</td>
+<td style="text-align: right;">6105</td>
+<td style="text-align: right;">255</td>
+<td style="text-align: right;">32</td>
+</tr>
+<tr>
+<td style="text-align: right;">20</td>
+<td style="text-align: right;">88410</td>
+<td style="text-align: right;">1010</td>
+<td style="text-align: right;">62</td>
+</tr>
+<tr>
+<td style="text-align: right;">50</td>
+<td style="text-align: right;">3252525</td>
+<td style="text-align: right;">6275</td>
+<td style="text-align: right;">152</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h1 id="sec:discussion">Discussion</h1>
+<h2 id="what-the-dynamic-model-buys">What the dynamic model buys</h2>
+<p>The three substantive experiments are three views of one fact: a
+correlation that moves must be tracked, not averaged. In tracking
+(Table <a href="#tab:track" data-reference-type="ref"
+data-reference="tab:track">1</a>) the static estimate’s error is an
+order of magnitude worse than DCC’s inside the crisis, and the rolling
+windows force a choice — responsiveness or smoothness — that DCC does
+not. In risk (Table <a href="#tab:risk" data-reference-type="ref"
+data-reference="tab:risk">2</a>) the same static average that looks
+calibrated in aggregate (<span class="math inline">0.049</span> against
+nominal <span class="math inline">0.05</span>) under-states the crisis
+tail by a factor of <span class="math inline">2.2</span>, which is the
+failure mode that matters: a risk model is not judged on its average
+behavior but on its behavior in the tail, and the static model’s tail
+arrives concentrated inside exactly the window it cannot see. DCC’s
+crisis breach rate of <span class="math inline">0.063</span> against the
+true-covariance floor of <span class="math inline">0.060</span> says the
+residual error is close to irreducible. In hedging the dynamic ratio’s
+crisis variance reduction of <span class="math inline">0.208</span> is
+the same effect measured in a trading decision rather than a
+diagnostic.</p>
+<h2 id="why-correlation-targeting-and-causal-timing-matter">Why
+correlation targeting and causal timing matter</h2>
+<p>Two implementation choices carry the result and are worth isolating.
+Correlation targeting — plugging <span
+class="math inline">\bar{Q}</span> in as a sample estimate rather than
+optimizing it — is what collapses the correlation layer to two
+parameters and makes the <span class="math inline">d=50</span> column of
+Table <a href="#tab:dim" data-reference-type="ref"
+data-reference="tab:dim">3</a> possible; without it the correlation step
+would itself be an <span class="math inline">O(d^{2})</span>
+optimization. Its cost, invisible in this study by design, is that <span
+class="math inline">\bar{Q}</span> uses the full sample, so a strict
+walk-forward evaluation must re-estimate it on training data only.
+Causal timing in the recursion — scoring <span
+class="math inline">R_{t}</span> before advancing <span
+class="math inline">Q</span> — is what keeps the tracking numbers
+honest; the reverse convention would let <span
+class="math inline">R_{t}</span> peek at the contemporaneous shock and
+flatter every error in Table <a href="#tab:track"
+data-reference-type="ref" data-reference="tab:track">1</a>.</p>
+<h2 id="the-honest-anatomy-of-the-risk-result">The honest anatomy of the
+risk result</h2>
+<p>The risk experiment is engineered to make one point cleanly, and its
+limitations follow from that engineering. The crisis is a joint
+volatility and correlation spike, so the static under-statement mixes
+two effects; we do not decompose how much of the <span
+class="math inline">2.2\times</span> breach comes from stale volatility
+versus stale correlation, only that ignoring the joint dynamics is what
+fails. The true covariance breaches at <span
+class="math inline">0.060</span> rather than exactly <span
+class="math inline">0.05</span> because a Gaussian-quantile VaR on a
+GARCH-mixture return is mildly miscalibrated in finite sample even when
+the covariance is known — which is the correct floor to compare against,
+and DCC’s <span class="math inline">0.063</span> essentially reaches it.
+These are single seeded processes, not Monte Carlo frequency statements;
+they demonstrate the mechanism and its magnitude under known truth, not
+its distribution across markets.</p>
+<h1 id="sec:limitations">Limitations</h1>
+<ul>
+<li><p><strong>Synthetic data, by design.</strong> Both processes — a
+prescribed correlation path over GARCH volatilities, and a stationary
+DCC recursion — are chosen so that ground truth is known exactly, which
+is the point of a calibration study and also its boundary. Real returns
+have fat tails, asymmetric correlation responses, and structural breaks
+the Gaussian quasi-likelihood does not model; the experiments say what
+DCC recovers when its assumptions hold, not how it behaves when they do
+not.</p></li>
+<li><p><strong>Scalar DCC dynamics.</strong> One <span
+class="math inline">a</span> and one <span class="math inline">b</span>
+govern every pair. The asymmetric DCC of <span class="citation"
+data-cites="cappiello2006asymmetric">[4]</span>, which adds a
+downside-correlation term, is the natural extension for markets where
+crash-correlation dominates; we did not implement it.</p></li>
+<li><p><strong>Correlation targeting leaks the full sample.</strong> The
+in-sample <span class="math inline">\bar{Q}</span> used here is a
+look-ahead device acceptable in a controlled study but not in a
+backtest; the tracking and risk numbers are in-sample filtering results,
+not walk-forward performance.</p></li>
+<li><p><strong>Gaussian quasi-likelihood.</strong> We estimate under a
+Gaussian kernel; Student-<span class="math inline">t</span> innovations
+and the <span class="citation"
+data-cites="englesheppard2001dcc">[8]</span> standard-error correction
+would be needed for inference on real data. For recovering the point
+path they are not.</p></li>
+<li><p><strong>Parameter counts are structural, not fitted.</strong>
+Table <a href="#tab:dim" data-reference-type="ref"
+data-reference="tab:dim">3</a> counts free parameters of the full VECH
+and BEKK specifications; the diagonal and scalar restrictions people
+actually use are smaller, but so is their generality, and none of them
+recover DCC’s <span class="math inline">O(d)</span> scaling with a
+moving full correlation matrix.</p></li>
+<li><p><strong>Single seeded runs.</strong> The tracking, risk, and
+hedge experiments are worked examples with known truth, not frequency
+statements across seeds; the recovery experiment’s stability across
+<span class="math inline">d</span> is the closest thing to a robustness
+sweep we report.</p></li>
+</ul>
+<h1 id="sec:conclusion">Conclusion</h1>
+<p>Under controlled conditions with a known moving correlation,
+DCC-GARCH does what it promises. It tracks a calm/crisis/recovery
+correlation path with a crisis-window error roughly a seventh of the
+static estimate’s and at or below the best fixed rolling window on every
+slice at once, and it recovers the data-generating <span
+class="math inline">(a,b)</span> to within sampling noise. The cost of
+ignoring the dynamics is concrete and one-sided: a static covariance
+that looks perfectly calibrated in aggregate under-states portfolio tail
+risk by a factor of <span class="math inline">2.2</span> inside the
+correlation spike, while DCC tracks the true covariance to the
+finite-sample floor; a static hedge drifts out of neutrality exactly
+when correlation moves, where the dynamic hedge cuts spread variance by
+a fifth. And because correlation targeting fixes the correlation layer
+at two parameters, all of this scales to cross-sections where full
+multivariate GARCH cannot be estimated at all. None of this is a claim
+about any market — the processes are synthetic and seeded — but as a
+statement about the method, the dynamic model recovers what the static
+one throws away, and the discarded information is most valuable
+precisely when it is most costly to lack.</p>
+<h4 id="reproducibility.">Reproducibility.</h4>
+<p>All code, tests, and outputs accompany this paper:
+<code>scripts/run_all.py</code> regenerates
+<code>results/results.json</code> from fixed seeds (Python <span
+class="math inline">3.14.6</span>, NumPy <span
+class="math inline">2.5.1</span>); <code>scripts/dcc.py</code> contains
+the self-contained DCC estimator;
+<code>scripts/check_paper_numbers.py</code> verifies every numeric claim
+in this manuscript against that file and fails on any mismatch;
+<code>tests/</code> contains deterministic invariant tests, including
+that the estimator recovers a known <span
+class="math inline">(a,b)</span> within tolerance.</p>
+<h1 id="references">References</h1><div id="refs" class="references csl-bib-body" data-entry-spacing="1"
+role="list">
+<div id="ref-bollerslev1986garch" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[1] </div><div class="csl-right-inline">Tim
+Bollerslev. Generalized autoregressive conditional heteroskedasticity.
+<em>Journal of Econometrics</em>, 31(3):307–327, 1986. doi: <a
+href="https://doi.org/10.1016/0304-4076(86)90063-1">10.1016/0304-4076(86)90063-1</a>.</div>
+</div>
+<div id="ref-bollerslev1990ccc" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[2] </div><div class="csl-right-inline">Tim
+Bollerslev. Modelling the coherence in short-run nominal exchange rates:
+A multivariate generalized <span>ARCH</span> model. <em>The Review of
+Economics and Statistics</em>, 72(3):498–505, 1990. doi: <a
+href="https://doi.org/10.2307/2109358">10.2307/2109358</a>.</div>
+</div>
+<div id="ref-bollerslev1988vech" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[3] </div><div class="csl-right-inline">Tim
+Bollerslev, Robert F. Engle, and Jeffrey M. Wooldridge. A capital asset
+pricing model with time-varying covariances. <em>Journal of Political
+Economy</em>, 96(1):116–131, 1988. doi: <a
+href="https://doi.org/10.1086/261527">10.1086/261527</a>.</div>
+</div>
+<div id="ref-cappiello2006asymmetric" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[4] </div><div
+class="csl-right-inline">Lorenzo Cappiello, Robert F. Engle, and Kevin
+Sheppard. Asymmetric dynamics in the correlations of global equity and
+bond returns. <em>Journal of Financial Econometrics</em>, 4(4):537–572,
+2006. doi: <a
+href="https://doi.org/10.1093/jjfinec/nbl005">10.1093/jjfinec/nbl005</a>.</div>
+</div>
+<div id="ref-engle2002dcc" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[5] </div><div
+class="csl-right-inline">Robert Engle. Dynamic conditional correlation:
+A simple class of multivariate generalized autoregressive conditional
+heteroskedasticity models. <em>Journal of Business &amp; Economic
+Statistics</em>, 20(3):339–350, 2002. doi: <a
+href="https://doi.org/10.1198/073500102288618487">10.1198/073500102288618487</a>.</div>
+</div>
+<div id="ref-engle1982arch" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[6] </div><div
+class="csl-right-inline">Robert F. Engle. Autoregressive conditional
+heteroscedasticity with estimates of the variance of united kingdom
+inflation. <em>Econometrica</em>, 50(4):987–1007, 1982. doi: <a
+href="https://doi.org/10.2307/1912773">10.2307/1912773</a>.</div>
+</div>
+<div id="ref-englekroner1995bekk" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[7] </div><div
+class="csl-right-inline">Robert F. Engle and Kenneth F. Kroner.
+Multivariate simultaneous generalized <span>ARCH</span>. <em>Econometric
+Theory</em>, 11(1):122–150, 1995. doi: <a
+href="https://doi.org/10.1017/S0266466600009063">10.1017/S0266466600009063</a>.</div>
+</div>
+<div id="ref-englesheppard2001dcc" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[8] </div><div
+class="csl-right-inline">Robert Engle and Kevin Sheppard. Theoretical
+and empirical properties of dynamic conditional correlation multivariate
+<span>GARCH</span>. National Bureau of Economic Research, 2001. doi: <a
+href="https://doi.org/10.3386/w8554">10.3386/w8554</a>.</div>
+</div>
+<div id="ref-sheppard_arch" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[9] </div><div
+class="csl-right-inline"><span class="nocase">Kevin Sheppard and
+others</span>. <span class="nocase">arch</span>: Autoregressive
+conditional heteroskedasticity (<span>ARCH</span>) and other tools for
+financial econometrics (<span>Python</span>). Software, Zenodo, 2024.
+doi: <a
+href="https://doi.org/10.5281/zenodo.593254">10.5281/zenodo.593254</a>.
+<a href="https://github.com/bashtage/arch"
+class="uri">https://github.com/bashtage/arch</a>.</div>
+</div>
+</div>
