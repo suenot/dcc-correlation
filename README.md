@@ -1,5 +1,8 @@
 # Recovering Time-Varying Correlation with DCC-GARCH
 
+**Read online (interactive paper):** <https://dcc-correlation.marketmaker.cc> · **Blog post:** <https://marketmaker.cc/en/blog/post/dcc-garch-dynamic-correlation-crypto>
+
+
 A reproducible, controlled study of **Dynamic Conditional Correlation
 (DCC-GARCH)**. Sample correlation is an average over a window during which the
 true dependence structure was moving. We build **synthetic, seeded** processes
@@ -105,3 +108,4 @@ This study accompanies the [marketmaker.cc](https://marketmaker.cc) blog post
 ## License
 
 Code: MIT. Paper text and figures: CC BY 4.0.
+
